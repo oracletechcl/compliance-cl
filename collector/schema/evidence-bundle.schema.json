@@ -61,6 +61,21 @@
         "control_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "law_refs": {"type": "array", "items": {"type": "string"}},
         "remediation_candidates": {"type": "array", "items": {"type": "object"}},
+        "component": {
+          "type": "object",
+          "required": ["id", "name", "type", "provider", "service", "aspect", "resource_id", "identifier_type"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1},
+            "type": {"type": "string", "minLength": 1},
+            "provider": {"type": "string", "minLength": 1},
+            "service": {"type": "string", "minLength": 1},
+            "aspect": {"type": "string", "minLength": 1},
+            "resource_id": {"type": "string", "minLength": 1},
+            "identifier_type": {"type": "string", "minLength": 1}
+          }
+        },
         "source": {
           "type": "object",
           "required": ["collector"],
@@ -74,4 +89,3 @@
     }
   }
 }
-

@@ -14,24 +14,130 @@ El colector no emite un veredicto legal, no remedia configuraciones y no constit
 
 Para OCI, usar preferentemente Python 3.9–3.11, rango actualmente soportado por el SDK en Oracle Linux/Ubuntu. El núcleo offline mantiene compatibilidad declarada con Python 3.9 o superior.
 
-## Instalación
+## 1. Construir el entregable (proveedor)
 
-Desde la raíz del repositorio:
+Esta sección se ejecuta en el checkout del proveedor. El cliente final recibe únicamente el archivo `.tar.gz`; no necesita el repositorio ni debe usar `pip install -e`.
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e 'collector[all]'
-collector --help
-```
-
-Si solo se procesarán reportes DBSAT o fixtures exportados:
+Prepare una vez el ambiente de construcción desde la raíz del repositorio:
 
 ```bash
-python -m pip install -e 'collector[dev]'
+python3 -m venv collector/.build-venv
+collector/.build-venv/bin/python -m pip install --upgrade pip build
+mkdir -p collector/dist
 ```
 
-Las dependencias `oci` y `oracledb` se importan de forma diferida. No son necesarias para los tests mockeados.
+### Paquete online
+
+El paquete online incluye el colector y descarga `oci`, `python-oracledb` y sus dependencias dentro de un runtime privado durante el primer `doctor` o `run` del cliente. Requiere acceso al índice Python configurado por el cliente en esa primera ejecución.
+
+```bash
+./collector/build-customer-package.sh \
+  --output collector/dist/oracle-compliance-collector-online-all.tar.gz \
+  --mode online \
+  --extras all \
+  --python collector/.build-venv/bin/python
+```
+
+### Paquete offline
+
+El paquete offline incorpora todas las ruedas necesarias y no descarga dependencias en el ambiente del cliente. La máquina de construcción sí necesita acceso al índice Python. Debe tener el mismo sistema operativo, arquitectura y versión de Python que el equipo donde el cliente ejecutará el colector; las ruedas compiladas no son portables entre plataformas incompatibles.
+
+```bash
+./collector/build-customer-package.sh \
+  --output collector/dist/oracle-compliance-collector-offline-all.tar.gz \
+  --mode offline \
+  --extras all \
+  --python collector/.build-venv/bin/python
+```
+
+`--extras all` incluye las capacidades OCI y Oracle Database requeridas para los tres escenarios. El archivo entregado contiene el launcher `collector.sh`, las plantillas de perfiles, la aplicación, documentación, metadatos y `SHA256SUMS` para verificar su integridad. Use `--force` únicamente cuando quiera reemplazar deliberadamente un archivo de salida existente.
+
+## 2. Ejecutar el entregable (cliente final)
+
+El cliente necesita Python 3.9 o superior y `sha256sum` o `shasum`. No debe instalar el paquete manualmente: `collector.sh` crea y reutiliza un runtime privado bajo `.runtime/`. Ejecute siempre los comandos desde el directorio extraído.
+
+### 2.0 Descomprimir y verificar
+
+```bash
+tar -xzf oracle-compliance-collector-online-all.tar.gz
+cd oracle-compliance-collector-*
+./collector.sh verify
+./collector.sh version
+./collector.sh list-profiles
+```
+
+Para una entrega offline, cambie únicamente el nombre del archivo del primer comando. `verify` debe mostrar `Integrity: OK`. No modifique `profiles/`, `wheelhouse/`, `BUNDLE-METADATA` ni `SHA256SUMS`; `init` crea copias editables y privadas dentro de `customer-config/`.
+
+En todo perfil inicializado:
+
+1. Cambie `run.name` por un nombre único para la corrida.
+2. Reemplace todos los valores `[REPLACE_...]`.
+3. Mantenga contraseñas, tokens y llaves privadas fuera del YAML; use los mecanismos externos indicados en [CONFIGURATION.md](package/CONFIGURATION.md).
+4. Ejecute `doctor` antes de recolectar. Este comando verifica integridad, configuración, dependencias y el plan en modo `--dry-run`.
+
+### 2.1 OCI completo
+
+Inicialice el perfil completo, configure autenticación, tenancy, regiones y compartments, y luego ejecute:
+
+```bash
+./collector.sh init --profile oci/full-stack --environment oci-full
+# Editar customer-config/oci-full.yaml y reemplazar todos los [REPLACE_...]
+./collector.sh doctor --config customer-config/oci-full.yaml
+./collector.sh run --config customer-config/oci-full.yaml
+```
+
+La corrida consulta todos los servicios OCI registrados por el colector. Use preferentemente instance principal o resource principal; también se admiten session token y OCI config file.
+
+### 2.2 On-premises completo
+
+El alcance on-premises completo usa dos perfiles: uno para DBSAT y SQL directo, y otro para todos los middleware soportados. Así se mantienen corridas y fallos aislados por fuente.
+
+```bash
+./collector.sh init \
+  --profile onprem/database/database-full \
+  --environment onprem-database
+./collector.sh init \
+  --profile onprem/middleware/middleware-full \
+  --environment onprem-middleware
+
+# Editar ambos YAML y reemplazar todos los [REPLACE_...]
+./collector.sh doctor --config customer-config/onprem-database.yaml
+./collector.sh doctor --config customer-config/onprem-middleware.yaml
+
+./collector.sh run \
+  --config customer-config/onprem-database.yaml \
+  --offline-only
+./collector.sh run \
+  --config customer-config/onprem-middleware.yaml \
+  --offline-only
+```
+
+`--offline-only` impide llamadas OCI. DBSAT 4.0 o superior sigue siendo un prerrequisito externo cuando el perfil lo ejecuta; alternativamente puede configurarse un reporte DBSAT JSON ya generado. Los targets de middleware consumen los exports JSON definidos en su configuración.
+
+### 2.3 Híbrido completo
+
+El perfil híbrido combina DBSAT, SQL directo, todos los middleware y OCI en una corrida:
+
+```bash
+./collector.sh init \
+  --profile hybrid/onprem-oci-full \
+  --environment hybrid-full
+# Editar customer-config/hybrid-full.yaml y reemplazar todos los [REPLACE_...]
+./collector.sh doctor --config customer-config/hybrid-full.yaml
+./collector.sh run --config customer-config/hybrid-full.yaml
+```
+
+### Salida y códigos de término
+
+Sin `--out`, el launcher escribe en `out/` dentro del paquete extraído. Cada corrida genera:
+
+```text
+out/<run.name>/evidence-bundle.json
+out/<run.name>/collector.log
+out/<run.name>/raw/
+```
+
+El comando imprime la ruta final. Código `0` indica ejecución completa; código `2`, ejecución parcial con omisiones o errores aislados. En ese caso, revise `out/<run.name>/collector.log` y la cobertura del bundle antes de analizarlo. Para cambiar el destino, agregue `--out /ruta/absoluta/segura` a `./collector.sh run`.
 
 ## Configuración
 
@@ -354,7 +460,7 @@ out/<run.name>/
 └── collector.log
 ```
 
-Cada evidencia incluye `layer`, `resource`, `attribute`, `value`, `signal`, controles candidatos, remediaciones candidatas y una referencia a su fuente. `signal` solo admite `present`, `absent`, `unknown` o `misconfigured`; el bundle nunca incluye un `status` legal.
+Cada evidencia incluye `component` (identificador estable, nombre legible, tipo, proveedor, servicio, aspecto evaluado, `resource_id` y tipo de identificador), además de `layer`, `resource`, `attribute`, `value`, `signal`, controles candidatos, remediaciones candidatas y una referencia a su fuente. El componente se deriva de forma central para OCI, base de datos on-premises, SQL directo y middleware; no se emiten componentes vacíos ni UUID/OCID aislados como nombre visible. El OCID o alias permanece separado para trazabilidad operativa; bajo redacción estricta puede quedar seudonimizado. `signal` solo admite `present`, `absent`, `unknown` o `misconfigured`; el bundle nunca incluye un `status` legal.
 
 Los contratos están en:
 
@@ -362,6 +468,37 @@ Los contratos están en:
 - `schema/assessment.schema.json`
 
 El segundo schema documenta la salida de la etapa GPT; este paquete no ejecuta esa etapa.
+
+## Analizar el output con el skill
+
+El skill de Codex `collector-assessment-report` acepta la salida de cualquiera de los tres escenarios: OCI, on-premises o híbrido. En cada invocación se debe entregar **una sola ruta absoluta**; el skill no selecciona automáticamente una corrida de `collector/out` ni reutiliza una ruta anterior.
+
+Entradas aceptadas:
+
+- Un directorio de corrida que contenga exactamente un `evidence-bundle.json`.
+- Un archivo `.zip`, `.tar`, `.tar.gz` o `.tgz` que contenga exactamente un `evidence-bundle.json`.
+
+Ejemplo de invocación en Codex:
+
+```text
+$collector-assessment-report /ruta/absoluta/compliance-cl/collector/out/<run.name>
+```
+
+También puede solicitarlo en lenguaje natural, siempre incluyendo la ruta completa:
+
+```text
+Usa el skill collector-assessment-report para analizar /ruta/absoluta/collector-output.tar.gz
+```
+
+Para una entrada de directorio, el reporte revisado queda en:
+
+```text
+<collector-run>/analysis/collector-assessment-report/report.html
+<collector-run>/analysis/collector-assessment-report/report-data.json
+<collector-run>/analysis/collector-assessment-report/assessment.json
+```
+
+Para un archivo comprimido, queda junto al archivo en `<nombre-sin-extensión>-analysis/`. El HTML es autocontenido, funciona sin conexión y presenta la evaluación en español. La evaluación es técnica e informativa; no constituye asesoría legal ni una certificación de cumplimiento.
 
 ## Redacción y cifrado
 
@@ -430,33 +567,3 @@ python -m build collector
 ```
 
 Los tests usan fixtures y dobles del SDK; no necesitan una base Oracle ni una tenancy OCI real.
-
-## Paquete para clientes
-
-Generar un archivo conectado, que descarga dependencias sólo durante el primer uso:
-
-```bash
-./collector/build-customer-package.sh \
-  --mode online --extras all \
-  --output dist/oracle-collector-customer.tar.gz
-```
-
-Para redes aisladas, construir en el mismo sistema operativo, arquitectura y versión de Python que usará el cliente:
-
-```bash
-./collector/build-customer-package.sh \
-  --mode offline --extras all \
-  --output dist/oracle-collector-customer-offline.tar.gz
-```
-
-El cliente descomprime el archivo y ejecuta:
-
-```bash
-./collector.sh verify
-./collector.sh list-profiles
-./collector.sh init --profile oci/database-data-safe --environment production
-./collector.sh doctor --config customer-config/production.yaml
-./collector.sh run --config customer-config/production.yaml --out out
-```
-
-El paquete entrega las 19 plantillas inmutables bajo `profiles/{onprem,oci,hybrid}` y crea configs editables, con permisos `0600`, bajo `customer-config/`. Los configs del cliente quedan separados del ejecutable y no se sobrescriben durante una actualización.

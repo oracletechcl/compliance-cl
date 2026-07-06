@@ -293,20 +293,41 @@ The reviewed assessment generated from the explicit certified-run path is locate
 - `collector/out/kairos-compartment-certified-final-20260706/analysis/collector-assessment-report/report-data.json`
 - `collector/out/kairos-compartment-certified-final-20260706/analysis/collector-assessment-report/report.html`
 
-The final report derives its scope from the supplied bundle: 29 controls, 5 partial and 24 failed for
-missing required evidence. It distinguishes `not_evidenced` failures from directly observed technical
-violations. Ley 21.719 readiness is 0.0833 with 0.2917 evidence coverage; Ley
-21.595 readiness is 0 with 0.125 evidence coverage. The five partial controls are `inc-brechas`,
-`sec-backups`, `sec-logs`, `sec-monitoring`, and `sec-rest`. Product candidates include enablement and
-remediation guidance; cost remains `Quote required` with USD, as-of date, pricing basis, assumptions, and
-the official Oracle price-list source rather than fabricated prices. The self-contained HTML follows the
-executive mock layout and derives OCI, on-premises, or hybrid scope from each supplied bundle.
+The final report derives its scope directly from the supplied bundle: 29 controls, 7 partial and 22 no
+conformes. It has no `unknown` status: absence of required evidence is represented as a
+`not_evidenced` failure. The self-contained HTML is fully in Spanish, follows the executive mock layout,
+and derives OCI, on-premises, or hybrid scope from each supplied bundle. Its risk matrix and the gap rows
+are clickable: they filter and take the reviewer to the affected control details. Remediation and the
+Oracle product candidate are displayed for each control; the separate global mitigation and cost panels
+were intentionally removed.
+
+Cada detalle ahora presenta evidencia encontrada, la referencia y fuente de evidencia esperada desde el
+catálogo, estado de cumplimiento con porcentaje y color de la celda de riesgo, acción de mitigación, y el
+producto Oracle recomendado con su justificación y habilitación sugerida.
+
+La referencia esperada se muestra como una descripción del resultado, configuración, proceso y pruebas
+mínimas requeridas; no expone rutas ni nombres de archivos internos. Cuando existe evidencia insuficiente,
+el detalle identifica el componente o servicio revisado y la condición que no acredita cumplimiento.
+
+El contrato de evidencia ahora deriva un componente estructurado y no vacío para cada registro del collector,
+de forma uniforme en OCI, base de datos on-premises, SQL directo y middleware. Para controles sin evidencia,
+el informe muestra un componente objetivo del alcance como expectativa, no como un hallazgo observado.
+Los UUID, OCID y valores con hash no se usan como nombre visible del componente: se normalizan a servicio y
+aspecto legibles, por ejemplo `OCI Audit — Configuración de auditoría`. El plan de acción ya no contiene
+resultados esperados genéricos; cada fila identifica el control y componente, evidencia de aceptación y
+criterio de cierre correspondiente.
+
+El informe pivota primero por componente revisado: agrupa la evidencia, calcula estado y porcentaje del
+componente, y muestra los controles asociados. Las acciones abiertas se publican después en dos catálogos
+exclusivos: acciones habilitadas por productos Oracle y acciones de proceso sin producto asociado.
+Cada categoría tiene su propia matriz de riesgo clickeable. Los componentes conservan por separado su
+`resource_id`: OCID cuando está disponible, alias on-premises o identificador técnico del evento; la
+redacción estricta puede seudonimizar ese valor sin convertirlo en el nombre humano del componente.
 
 The reusable, version-controlled Codex skill is at `skills/collector-assessment-report/` and is installed
 through `~/.codex/skills/collector-assessment-report`. It hard-stops unless each invocation supplies one
 absolute collector-output directory or `.zip`/`.tar`/`.tar.gz`/`.tgz` archive. It does not infer the newest
 run or contain Kairos paths, regions, dates, counts, or outcomes. Archive traversal, links, oversized member
-sets, and excessive uncompressed size are rejected. Ten portability/privacy/archive tests and the Codex
-skill validator pass. The HTML is self-contained, searchable, and filterable; embedded-data parity and
-JavaScript syntax passed static validation. Interactive browser QA was unavailable because the browser
-backend was not connected.
+sets, and excessive uncompressed size are rejected. Fifteen portability/privacy/archive/interaction tests
+and the Codex skill validator pass. The HTML is self-contained, searchable, and filterable; JavaScript
+syntax and a headless-Chrome visual render passed validation.

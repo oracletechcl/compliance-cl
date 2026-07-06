@@ -41,6 +41,8 @@ def test_writer_creates_self_contained_schema_valid_bundle(tmp_path: Path) -> No
     schema_path = Path(__file__).parents[1] / "schema" / "evidence-bundle.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     jsonschema.validate(payload, schema)
+    component = payload["evidence"][0]["component"]
+    assert all(component[key] for key in ("id", "name", "type", "provider", "service"))
     assert (run_dir / "raw" / "dbsat" / "coreprod.report.json").exists()
     assert (run_dir / "collector.log").exists()
     assert payload["collector_version"]
