@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collector Assessment Report"
+  short_description: "Spanish dashboard for collector evidence"
+  default_prompt: "Use $collector-assessment-report on /absolute/path/to/collector-output to generate a Spanish, evidence-backed HTML compliance dashboard for OCI, on-premises, or hybrid scope. It must include a detected-Oracle-product compliance table (non-compliant products first, backed by evidence) and two independently scored tracks — Track A for controls enabled by Oracle products and Track B for process/governance/legal controls — each with its own readiness score and clickable risk matrix."

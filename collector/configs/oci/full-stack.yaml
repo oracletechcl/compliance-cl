@@ -1,0 +1,21 @@
+run:
+  name: template-oci-full-stack
+  redaction: strict
+  offline_only: false
+  parallelism: 32
+
+oci:
+  enabled: true
+  auth: instance_principal
+  tenancy_ocid: "[REPLACE_TENANCY_OCID]"
+  regions: [sa-santiago-1]
+  compartments: all
+  services: all
+  connect_timeout_seconds: 5
+  read_timeout_seconds: 30
+
+onprem_db:
+  enabled: false
+
+onprem_middleware:
+  enabled: false

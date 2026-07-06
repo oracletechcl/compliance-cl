@@ -1,0 +1,569 @@
+# Colector técnico Oracle para Ley 21.719
+
+Paquete Python de solo lectura que recolecta señales técnicas de seguridad desde Oracle Database y middleware on-premises, además de servicios OCI. Produce un `evidence-bundle.json` trazable para una etapa posterior de análisis.
+
+El colector no emite un veredicto legal, no remedia configuraciones y no constituye asesoría legal.
+
+## Requisitos
+
+- Python 3.9 o superior.
+- DBSAT 4.0 o superior para recolección DBSAT.
+- OCI Python SDK para OCI.
+- `python-oracledb` para consultas opcionales de catálogo.
+- Credenciales dedicadas de solo lectura.
+
+Para OCI, usar preferentemente Python 3.9–3.11, rango actualmente soportado por el SDK en Oracle Linux/Ubuntu. El núcleo offline mantiene compatibilidad declarada con Python 3.9 o superior.
+
+## 1. Construir el entregable (proveedor)
+
+Esta sección se ejecuta en el checkout del proveedor. El cliente final recibe únicamente el archivo `.tar.gz`; no necesita el repositorio ni debe usar `pip install -e`.
+
+Prepare una vez el ambiente de construcción desde la raíz del repositorio:
+
+```bash
+python3 -m venv collector/.build-venv
+collector/.build-venv/bin/python -m pip install --upgrade pip build
+mkdir -p collector/dist
+```
+
+### Paquete online
+
+El paquete online incluye el colector y descarga `oci`, `python-oracledb` y sus dependencias dentro de un runtime privado durante el primer `doctor` o `run` del cliente. Requiere acceso al índice Python configurado por el cliente en esa primera ejecución.
+
+```bash
+./collector/build-customer-package.sh \
+  --output collector/dist/oracle-compliance-collector-online-all.tar.gz \
+  --mode online \
+  --extras all \
+  --python collector/.build-venv/bin/python
+```
+
+### Paquete offline
+
+El paquete offline incorpora todas las ruedas necesarias y no descarga dependencias en el ambiente del cliente. La máquina de construcción sí necesita acceso al índice Python. Debe tener el mismo sistema operativo, arquitectura y versión de Python que el equipo donde el cliente ejecutará el colector; las ruedas compiladas no son portables entre plataformas incompatibles.
+
+```bash
+./collector/build-customer-package.sh \
+  --output collector/dist/oracle-compliance-collector-offline-all.tar.gz \
+  --mode offline \
+  --extras all \
+  --python collector/.build-venv/bin/python
+```
+
+`--extras all` incluye las capacidades OCI y Oracle Database requeridas para los tres escenarios. El archivo entregado contiene el launcher `collector.sh`, las plantillas de perfiles, la aplicación, documentación, metadatos y `SHA256SUMS` para verificar su integridad. Use `--force` únicamente cuando quiera reemplazar deliberadamente un archivo de salida existente.
+
+## 2. Ejecutar el entregable (cliente final)
+
+El cliente necesita Python 3.9 o superior y `sha256sum` o `shasum`. No debe instalar el paquete manualmente: `collector.sh` crea y reutiliza un runtime privado bajo `.runtime/`. Ejecute siempre los comandos desde el directorio extraído.
+
+### 2.0 Descomprimir y verificar
+
+```bash
+tar -xzf oracle-compliance-collector-online-all.tar.gz
+cd oracle-compliance-collector-*
+./collector.sh verify
+./collector.sh version
+./collector.sh list-profiles
+```
+
+Para una entrega offline, cambie únicamente el nombre del archivo del primer comando. `verify` debe mostrar `Integrity: OK`. No modifique `profiles/`, `wheelhouse/`, `BUNDLE-METADATA` ni `SHA256SUMS`; `init` crea copias editables y privadas dentro de `customer-config/`.
+
+En todo perfil inicializado:
+
+1. Cambie `run.name` por un nombre único para la corrida.
+2. Reemplace todos los valores `[REPLACE_...]`.
+3. Mantenga contraseñas, tokens y llaves privadas fuera del YAML; use los mecanismos externos indicados en [CONFIGURATION.md](package/CONFIGURATION.md).
+4. Ejecute `doctor` antes de recolectar. Este comando verifica integridad, configuración, dependencias y el plan en modo `--dry-run`.
+
+### 2.1 OCI completo
+
+Inicialice el perfil completo, configure autenticación, tenancy, regiones y compartments, y luego ejecute:
+
+```bash
+./collector.sh init --profile oci/full-stack --environment oci-full
+# Editar customer-config/oci-full.yaml y reemplazar todos los [REPLACE_...]
+./collector.sh doctor --config customer-config/oci-full.yaml
+./collector.sh run --config customer-config/oci-full.yaml
+```
+
+La corrida consulta todos los servicios OCI registrados por el colector. Use preferentemente instance principal o resource principal; también se admiten session token y OCI config file.
+
+### 2.2 On-premises completo
+
+El alcance on-premises completo usa dos perfiles: uno para DBSAT y SQL directo, y otro para todos los middleware soportados. Así se mantienen corridas y fallos aislados por fuente.
+
+```bash
+./collector.sh init \
+  --profile onprem/database/database-full \
+  --environment onprem-database
+./collector.sh init \
+  --profile onprem/middleware/middleware-full \
+  --environment onprem-middleware
+
+# Editar ambos YAML y reemplazar todos los [REPLACE_...]
+./collector.sh doctor --config customer-config/onprem-database.yaml
+./collector.sh doctor --config customer-config/onprem-middleware.yaml
+
+./collector.sh run \
+  --config customer-config/onprem-database.yaml \
+  --offline-only
+./collector.sh run \
+  --config customer-config/onprem-middleware.yaml \
+  --offline-only
+```
+
+`--offline-only` impide llamadas OCI. DBSAT 4.0 o superior sigue siendo un prerrequisito externo cuando el perfil lo ejecuta; alternativamente puede configurarse un reporte DBSAT JSON ya generado. Los targets de middleware consumen los exports JSON definidos en su configuración.
+
+### 2.3 Híbrido completo
+
+El perfil híbrido combina DBSAT, SQL directo, todos los middleware y OCI en una corrida:
+
+```bash
+./collector.sh init \
+  --profile hybrid/onprem-oci-full \
+  --environment hybrid-full
+# Editar customer-config/hybrid-full.yaml y reemplazar todos los [REPLACE_...]
+./collector.sh doctor --config customer-config/hybrid-full.yaml
+./collector.sh run --config customer-config/hybrid-full.yaml
+```
+
+### Salida y códigos de término
+
+Sin `--out`, el launcher escribe en `out/` dentro del paquete extraído. Cada corrida genera:
+
+```text
+out/<run.name>/evidence-bundle.json
+out/<run.name>/collector.log
+out/<run.name>/raw/
+```
+
+El comando imprime la ruta final. Código `0` indica ejecución completa; código `2`, ejecución parcial con omisiones o errores aislados. En ese caso, revise `out/<run.name>/collector.log` y la cobertura del bundle antes de analizarlo. Para cambiar el destino, agregue `--out /ruta/absoluta/segura` a `./collector.sh run`.
+
+## Configuración
+
+Copiar `collector.config.example.yaml` y reemplazar identificadores, regiones y rutas. El archivo puede referenciar perfiles OCI, wallets y archivos exportados, pero no puede contener contraseñas, tokens, llaves privadas ni valores de secretos.
+
+```bash
+cp collector/collector.config.example.yaml collector.config.yaml
+```
+
+Modos OCI admitidos:
+
+- `instance_principal`
+- `resource_principal`
+- `session_token`
+- `config_file`
+
+Orden operacional recomendado: instance/resource principal, session token y, finalmente, config file.
+
+La versión inicial procesa una tenancy OCI por corrida y múltiples regiones y compartments dentro de ella.
+
+Para colecciones OCI completas, `run.parallelism` controla cuántos servicios/regiones se consultan en
+paralelo (default: `16`; el perfil `full-stack` usa `32`). `oci.connect_timeout_seconds` y
+`oci.read_timeout_seconds` limitan esperas de red por llamada (defaults: `5` y `30`). Los clientes cierran
+su pool HTTP al terminar cada tarea para liberar sockets. Si OCI responde `429`, el backoff paginado sigue
+aplicándose; reduzca el paralelismo si la tenancy presenta throttling sostenido. El colector desactiva la
+estrategia de retry implícita del SDK (hasta 10 minutos en algunas operaciones) para que estos límites sean
+efectivos y para mantener el aislamiento de fallos por servicio.
+
+Referencias oficiales: [timeouts de conexión/lectura](https://docs.oracle.com/en-us/iaas/tools/python/latest/customize_service_client/connection_read_timeout.html),
+[estrategias de retry](https://docs.oracle.com/en-us/iaas/tools/python/latest/sdk_behaviors/retries.html) y
+[helpers de paginación](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/pagination.html).
+
+### Perfiles por stack y ambiente
+
+El directorio [`configs/`](configs/README.md) contiene perfiles independientes para:
+
+- Base de datos on-premises: DBSAT, SQL directo o ambos.
+- Middleware: WebLogic, OHS, OAM, OAA, WebGate, OAG, AVDF o todos.
+- OCI: stack completo o perfiles por identidad, datos, cómputo, red, observabilidad y Object Storage.
+- Ambiente híbrido on-premises + OCI.
+
+Copie el perfil apropiado a un directorio propio de ambiente (`configs/dev`, `configs/qa` o `configs/prod`), cambie `run.name` y reemplace los valores `[REPLACE_...]`. Los perfiles no contienen secretos y no deben recibir contraseñas, tokens ni llaves privadas.
+
+## Guía de productos y perfiles
+
+Cada perfil habilita solo el producto o la capa indicada. Las rutas siguientes son relativas a `collector/`; puede ejecutarlas desde la raíz del repositorio anteponiendo `collector/` al argumento de `--config`.
+
+### Oracle Database on-premises
+
+| Producto/fuente | Qué recolecta | Perfil |
+|---|---|---|
+| **DBSAT** | Findings de TDE, redacción/masking, Database Vault, Label Security, auditoría, usuarios, autenticación, parches, TLS, STIG y CIS. Requiere DBSAT 4.0+ o un reporte JSON existente. | `configs/onprem/database/dbsat-only.yaml` |
+| **Direct SQL** | Solo vistas allowlist de catálogo: wallet/TDE, auditoría, RMAN, backup, rol de base, Data Guard y RAC. Requiere `python-oracledb`, wallet/external credentials y rol `readonly_monitor` o `select_catalog_role`. | `configs/onprem/database/direct-sql-only.yaml` |
+| **DBSAT + Direct SQL** | Combina evaluación DBSAT con estado efectivo del catálogo para una visión on-premises completa. | `configs/onprem/database/database-full.yaml` |
+
+Uso:
+
+```bash
+# Solo DBSAT
+./collector/run-collector.sh \
+  --config collector/configs/onprem/database/dbsat-only.yaml \
+  --only dbsat \
+  --offline-only
+
+# Solo catálogo SQL
+./collector/run-collector.sh \
+  --config collector/configs/onprem/database/direct-sql-only.yaml \
+  --only direct_sql \
+  --offline-only
+
+# Ambos colectores de base de datos
+./collector/run-collector.sh \
+  --config collector/configs/onprem/database/database-full.yaml \
+  --only dbsat \
+  --only direct_sql \
+  --offline-only
+```
+
+### Middleware on-premises
+
+Todos los productos de middleware se leen desde exports JSON locales y exigen `read_config_only: true`; el colector no conduce una consola administrativa ni modifica el dominio.
+
+| Producto | Qué recolecta | Perfil |
+|---|---|---|
+| **WebLogic** | TLS, protocolos/ciphers, listeners, Node Manager y política de contraseñas del dominio. | `configs/onprem/middleware/weblogic.yaml` |
+| **Oracle HTTP Server (OHS)** | SSL/TLS, protocolo mínimo, ciphers y listeners del frontend HTTP. | `configs/onprem/middleware/ohs.yaml` |
+| **Oracle Access Manager (OAM)** | MFA, autenticación fuerte y políticas de acceso exportadas. | `configs/onprem/middleware/oam.yaml` |
+| **Oracle Advanced Authentication (OAA)** | Señales de autenticación fuerte y factores adicionales. | `configs/onprem/middleware/oaa.yaml` |
+| **WebGate** | Integración FIDO/MFA y controles de acceso del agente WebGate. | `configs/onprem/middleware/webgate.yaml` |
+| **Oracle API Gateway on-premises (OAG)** | Autenticación en el borde y throttling. | `configs/onprem/middleware/oag.yaml` |
+| **Audit Vault and Database Firewall (AVDF)** | Bases monitorizadas, SQL Firewall, bloqueo y señales de auditoría/incidentes. | `configs/onprem/middleware/avdf.yaml` |
+| **Middleware completo** | Ejecuta todos los targets anteriores desde sus exports JSON. | `configs/onprem/middleware/middleware-full.yaml` |
+
+Uso de un producto individual:
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/onprem/middleware/weblogic.yaml \
+  --only middleware \
+  --offline-only
+```
+
+Para OHS, OAM, OAA, WebGate, OAG o AVDF cambie la ruta por su perfil. El CLI agrupa todos bajo `middleware`; por eso el archivo seleccionado determina qué producto se ejecuta.
+
+### OCI Identity y gobierno
+
+Perfil: `configs/oci/identity-governance.yaml`
+
+| Producto/servicio | Qué recolecta |
+|---|---|
+| **OCI IAM** | Usuarios, grupos, políticas y estado MFA; advierte políticas observadas con permisos de escritura. |
+| **Cloud Guard** | Resúmenes de problems y targets devueltos por `list_problems` y `list_targets`. |
+| **Security Zones** | Zonas devueltas por `list_security_zones`. |
+| **OCI Vault/KMS** | Resúmenes de vaults devueltos por `list_vaults`; no lista llaves ni extrae material secreto. |
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/oci/identity-governance.yaml \
+  --only oci
+```
+
+### OCI Datos y bases gestionadas
+
+Perfil: `configs/oci/database-data-safe.yaml`
+
+| Producto/servicio | Qué recolecta |
+|---|---|
+| **OCI Data Safe** | Bases registradas y resúmenes de security assessments devueltos por las operaciones de listado registradas. No ejecuta masking, discovery ni auditoría. |
+| **OCI Database** | Resúmenes de DB Systems y Autonomous Database. No enumera backups ni configuraciones Data Guard adicionales. |
+| **GoldenGate** | Deployments y presencia de replicación. |
+| **MySQL HeatWave** | Resúmenes de DB Systems MySQL devueltos por `list_db_systems`. |
+| **OCI Database with PostgreSQL** | Resúmenes de DB Systems PostgreSQL devueltos por `list_db_systems`. |
+| **NoSQL Database Cloud** | Resúmenes de tablas devueltos por `list_tables`. |
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/oci/database-data-safe.yaml \
+  --only oci
+```
+
+### OCI Cómputo, almacenamiento y contenedores
+
+Perfil: `configs/oci/compute-storage-oke.yaml`
+
+| Producto/servicio | Qué recolecta |
+|---|---|
+| **OCI Compute** | Resúmenes de instancias devueltos por `list_instances`; no lista imágenes ni agentes por separado. |
+| **Block/Boot Volume** | Resúmenes de volúmenes y boot volumes por compartment/availability domain; no enumera backups. |
+| **Oracle Kubernetes Engine (OKE)** | Resúmenes de clusters y node pools devueltos por sus operaciones de listado. |
+| **Object Storage** | Resúmenes de buckets y campos disponibles en `list_buckets`, incluido `public_access_type` cuando la API lo devuelve. No lista lifecycle ni retention rules adicionales. |
+| **OCI Functions** | Resúmenes de applications y functions, recorriendo primero cada application. |
+| **Container Instances** | Resúmenes de container instances devueltos por `list_container_instances`. |
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/oci/compute-storage-oke.yaml \
+  --only oci
+```
+
+Para recolectar únicamente buckets use `configs/oci/object-storage.yaml`:
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/oci/object-storage.yaml \
+  --only oci.object_storage
+```
+
+### OCI Red y perímetro
+
+Perfil: `configs/oci/network-perimeter.yaml`
+
+| Producto/servicio | Qué recolecta |
+|---|---|
+| **VCN/Networking** | Resúmenes de VCNs, subnets y NSGs; no lista route tables ni gateways adicionales. |
+| **OCI WAF** | Resúmenes de Web Application Firewalls y WAF policies; no enumera reglas internas de cada policy. |
+| **Network Firewall** | Resúmenes de network firewalls; no enumera el contenido de sus policies. |
+| **Load Balancer** | Resúmenes devueltos por `list_load_balancers`; no consulta listeners individualmente. |
+| **OCI Bastion** | Bastions y contexto de acceso administrado. |
+| **OCI Certificates** | Resúmenes de certificados devueltos por `list_certificates`; no enumera CAs por separado. |
+| **OCI API Gateway** | Resúmenes de gateways devueltos por `list_gateways`; no consulta deployments ni configuración de autenticación. |
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/oci/network-perimeter.yaml \
+  --only oci
+```
+
+### OCI Observabilidad, incidentes y recuperación
+
+Perfil: `configs/oci/observability-dr.yaml`
+
+| Producto/servicio | Qué recolecta |
+|---|---|
+| **OCI Audit** | Eventos recientes y presencia de auditoría del tenant. |
+| **OCI Logging** | Log groups devueltos por `list_log_groups`; no enumera logs individuales. |
+| **Logging Analytics** | Namespaces y entidades de Logging Analytics. |
+| **OCI Monitoring** | Alarmas configuradas, especialmente señales de seguridad. |
+| **OCI Events** | Reglas que reaccionan ante cambios o incidentes. |
+| **OCI Notifications** | Topics usados para avisos y flujos de respuesta. |
+| **Threat Intelligence** | Indicadores disponibles para detección de amenazas. |
+| **Full Stack Disaster Recovery** | DR Protection Groups devueltos por `list_dr_protection_groups`; no enumera planes de recuperación. |
+
+```bash
+./collector/run-collector.sh \
+  --config collector/configs/oci/observability-dr.yaml \
+  --only oci
+```
+
+### OCI completo e híbrido
+
+| Perfil | Uso |
+|---|---|
+| `configs/oci/full-stack.yaml` | Ejecuta todos los servicios OCI registrados en las regiones/compartments configurados. |
+| `configs/hybrid/onprem-oci-full.yaml` | Combina DBSAT, SQL directo, todos los middleware soportados y OCI completo. |
+
+```bash
+# Todo OCI
+./collector/run-collector.sh \
+  --config collector/configs/oci/full-stack.yaml \
+  --only oci
+
+# Stack híbrido completo
+./collector/run-collector.sh \
+  --config collector/configs/hybrid/onprem-oci-full.yaml
+```
+
+Antes de una corrida real, ejecute el mismo comando con `--dry-run`. Un perfil define el alcance máximo; `--only` y `--skip` permiten reducirlo para una corrida concreta.
+
+## Operación
+
+Inventario OCI sin DBSAT:
+
+```bash
+collector run --config collector.config.yaml --only oci --skip dbsat
+```
+
+Corrida completa:
+
+```bash
+collector run --config collector.config.yaml --out ./out
+```
+
+Validación y plan sin llamadas de inventario:
+
+```bash
+collector run --config collector.config.yaml --dry-run
+```
+
+Solo fuentes on-premises:
+
+```bash
+collector run --config collector.config.yaml --offline-only
+```
+
+Un servicio individual:
+
+```bash
+collector run --config collector.config.yaml --only oci.object_storage
+```
+
+Los valores de `--only` y `--skip` se pueden repetir o separar por comas.
+
+### Wrapper Bash
+
+El repositorio incluye `collector/run-collector.sh` para ejecutar el mismo CLI mediante opciones largas, sin activar manualmente un entorno virtual:
+
+```bash
+./collector/run-collector.sh \
+  --config ./collector.config.yaml \
+  --out ./out
+```
+
+Ejemplos:
+
+```bash
+# Validar configuración y mostrar el plan
+./collector/run-collector.sh --config ./collector.config.yaml --dry-run
+
+# Ejecutar solo Object Storage y omitir DBSAT
+./collector/run-collector.sh \
+  --config ./collector.config.yaml \
+  --only oci.object_storage \
+  --skip dbsat
+
+# Ejecutar solo fuentes on-premises y cifrar el bundle
+./collector/run-collector.sh \
+  --config ./collector.config.yaml \
+  --offline-only \
+  --encryption-key-file ./bundle.key
+```
+
+Opciones disponibles:
+
+- `--config PATH` — por defecto `./collector.config.yaml`.
+- `--out PATH` — por defecto `./out`.
+- `--only NAME` y `--skip NAME` — repetibles.
+- `--dry-run` y `--offline-only`.
+- `--encryption-key-file PATH`.
+- `--collector-bin PATH` — fuerza un ejecutable específico.
+- `--help` y `--version`.
+
+El wrapper resuelve el ejecutable en este orden: `--collector-bin`, `.venv/bin/collector` en la raíz del repositorio, `collector` disponible en `PATH` y, finalmente, `python3 -m oracle_collector` usando el código local. No instala dependencias ni crea entornos virtuales. Propaga sin cambios el código de salida del colector.
+
+### Códigos de salida
+
+- `0`: corrida completa sin errores.
+- `2`: terminó con servicios saltados o errores parciales no fatales.
+- `1`: configuración, autenticación u otro error fatal.
+
+Un colector fallido no cancela los demás.
+
+## Salida
+
+```text
+out/<run.name>/
+├── evidence-bundle.json
+├── raw/
+│   ├── dbsat/
+│   └── oci/<service>/<region>.json
+└── collector.log
+```
+
+Cada evidencia incluye `component` (identificador estable, nombre legible, tipo, proveedor, servicio, aspecto evaluado, `resource_id` y tipo de identificador), además de `layer`, `resource`, `attribute`, `value`, `signal`, controles candidatos, remediaciones candidatas y una referencia a su fuente. El componente se deriva de forma central para OCI, base de datos on-premises, SQL directo y middleware; no se emiten componentes vacíos ni UUID/OCID aislados como nombre visible. El OCID o alias permanece separado para trazabilidad operativa; bajo redacción estricta puede quedar seudonimizado. `signal` solo admite `present`, `absent`, `unknown` o `misconfigured`; el bundle nunca incluye un `status` legal.
+
+Los contratos están en:
+
+- `schema/evidence-bundle.schema.json`
+- `schema/assessment.schema.json`
+
+El segundo schema documenta la salida de la etapa GPT; este paquete no ejecuta esa etapa.
+
+## Analizar el output con el skill
+
+El skill de Codex `collector-assessment-report` acepta la salida de cualquiera de los tres escenarios: OCI, on-premises o híbrido. En cada invocación se debe entregar **una sola ruta absoluta**; el skill no selecciona automáticamente una corrida de `collector/out` ni reutiliza una ruta anterior.
+
+Entradas aceptadas:
+
+- Un directorio de corrida que contenga exactamente un `evidence-bundle.json`.
+- Un archivo `.zip`, `.tar`, `.tar.gz` o `.tgz` que contenga exactamente un `evidence-bundle.json`.
+
+Ejemplo de invocación en Codex:
+
+```text
+$collector-assessment-report /ruta/absoluta/compliance-cl/collector/out/<run.name>
+```
+
+También puede solicitarlo en lenguaje natural, siempre incluyendo la ruta completa:
+
+```text
+Usa el skill collector-assessment-report para analizar /ruta/absoluta/collector-output.tar.gz
+```
+
+Para una entrada de directorio, el reporte revisado queda en:
+
+```text
+<collector-run>/analysis/collector-assessment-report/report.html
+<collector-run>/analysis/collector-assessment-report/report-data.json
+<collector-run>/analysis/collector-assessment-report/assessment.json
+```
+
+Para un archivo comprimido, queda junto al archivo en `<nombre-sin-extensión>-analysis/`. El HTML es autocontenido, funciona sin conexión y presenta la evaluación en español. La evaluación es técnica e informativa; no constituye asesoría legal ni una certificación de cumplimiento.
+
+## Redacción y cifrado
+
+`strict` hashea OCIDs y elimina secretos. `minimal` conserva más contexto, pero también reemplaza OCIDs completos. Ambos modos eliminan contraseñas, tokens, autorizaciones, llaves privadas y credenciales embebidas en URI/DSN.
+
+Para cifrar el bundle durante transporte, entregar una llave AES-256-GCM de 32 bytes, cruda o en Base64:
+
+```bash
+openssl rand -base64 32 > bundle.key
+chmod 600 bundle.key
+collector run --config collector.config.yaml --encryption-key-file bundle.key
+```
+
+Se crea `evidence-bundle.json.aesgcm` y no se escribe una copia JSON en claro.
+
+## Permisos mínimos OCI
+
+Usar un grupo o dynamic group exclusivo. Punto de partida:
+
+```text
+Allow group ComplianceCollectorReaders to inspect all-resources in tenancy
+Allow group ComplianceCollectorReaders to read audit-events in tenancy
+```
+
+Agregar permisos `read` solo para servicios cuya API no exponga la configuración requerida con `inspect`, y limitar por compartment cuando sea posible. No otorgar `manage`. El colector usa únicamente operaciones list/get/read y advierte cuando observa políticas IAM con verbos `use` o `manage`.
+
+Algunos servicios requieren permisos específicos adicionales, entre ellos Data Safe, Logging Analytics, Threat Intelligence y Full Stack Disaster Recovery. Un permiso faltante queda registrado como error parcial o servicio saltado.
+
+## Permisos mínimos Oracle Database
+
+Usar una cuenta dedicada, nunca `SYS`, `SYSTEM`, `SYSDBA`, `SYSOPER`, `DBA` ni equivalentes. La cuenta debe estar limitada al catálogo requerido, por ejemplo mediante un rol dedicado basado en `SELECT_CATALOG_ROLE`, sin grants sobre esquemas de negocio.
+
+El módulo SQL ejecuta una allowlist fija sobre:
+
+- `V$ENCRYPTION_WALLET`
+- `V$ENCRYPTED_TABLESPACES`
+- `DBA_AUDIT_MGMT_CONFIG_PARAMS`
+- `AUDIT_UNIFIED_POLICIES`
+- `V$RMAN_BACKUP_JOB_DETAILS`
+- `V$BACKUP`
+- `V$DATABASE`
+- `V$DATAGUARD_CONFIG`
+- `GV$INSTANCE`
+
+La configuración debe usar `role: readonly_monitor` o `select_catalog_role`. La autenticación se resuelve fuera del YAML mediante wallet/external credentials.
+
+## DBSAT
+
+El colector invoca `dbsat collect` y `dbsat report -f json` mediante listas de argumentos y `shell=False`. Rechaza connection strings con passwords embebidos y sesiones privilegiadas. También puede procesar un reporte JSON preexistente mediante `report_path` en el target.
+
+## Middleware
+
+WebLogic, OHS, OAM, OAA, WebGate, OAG y AVDF se leen desde exports JSON locales o datos inyectados por un integrador. Cada target exige `read_config_only: true`. Una URL administrativa sin export local se rechaza: el colector no automatiza cambios ni conduce una sesión remota propietaria.
+
+## Servicios OCI
+
+El registro cubre IAM, Cloud Guard, Security Zones, Vault/KMS, Data Safe, Database, GoldenGate, MySQL, PostgreSQL, NoSQL, Compute, Block/Boot Storage, OKE, Object Storage, Functions, Container Instances, Networking, WAF, Network Firewall, Load Balancer, Bastion, Certificates, API Gateway, Audit, Logging, Logging Analytics, Monitoring, Events, Notifications, Threat Intelligence y Full Stack Disaster Recovery.
+
+Cada cliente pagina respuestas, reintenta throttling HTTP 429 con backoff y degrada de forma segura cuando una operación o permiso no está disponible.
+
+## Desarrollo y validación
+
+```bash
+python -m pytest collector/tests
+python -m build collector
+```
+
+Los tests usan fixtures y dobles del SDK; no necesitan una base Oracle ni una tenancy OCI real.
