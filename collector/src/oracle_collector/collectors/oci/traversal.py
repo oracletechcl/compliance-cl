@@ -19,13 +19,27 @@ def _items(response: Any) -> list[Any]:
     return [items]
 
 
-def paginate(call: Callable[..., Any], *, max_retries: int = 4, **kwargs: Any) -> list[Any]:
+def paginate(
+    call: Callable[..., Any],
+    *,
+    max_retries: int = 4,
+    max_pages: int | None = None,
+    on_truncated: Callable[[], None] | None = None,
+    **kwargs: Any,
+) -> list[Any]:
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("max_pages must be at least 1")
+
     collected: list[Any] = []
     page: str | None = None
+    pages_collected = 0
     retries = 0
     while True:
         try:
-            response = call(page=page, **kwargs)
+            call_kwargs = dict(kwargs)
+            if page:
+                call_kwargs["page"] = page
+            response = call(**call_kwargs)
             retries = 0
         except Exception as exc:
             status = getattr(exc, "status", None)
@@ -34,10 +48,15 @@ def paginate(call: Callable[..., Any], *, max_retries: int = 4, **kwargs: Any) -
             time.sleep(min(2**retries, 8))
             retries += 1
             continue
+        pages_collected += 1
         collected.extend(_items(response))
         headers = getattr(response, "headers", {}) or {}
         page = headers.get("opc-next-page") or headers.get("opc_next_page")
         if not page:
+            break
+        if max_pages is not None and pages_collected >= max_pages:
+            if on_truncated is not None:
+                on_truncated()
             break
     return collected
 

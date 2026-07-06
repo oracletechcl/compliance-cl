@@ -12,6 +12,31 @@ def test_minimal_mode_still_masks_full_ocids() -> None:
     assert payload["resource"].startswith("ocid1.instance.")
 
 
+def test_strict_mode_deterministically_pseudonymizes_email_addresses() -> None:
+    email = "Alice.Smith+audit@Example.COM"
+    payload = {
+        "owner": email,
+        "message": f"Contact <{email}> or {email}.",
+    }
+
+    first = redact(payload, mode="strict")
+    second = redact(payload, mode="strict")
+    encoded = json.dumps(first, sort_keys=True)
+
+    assert first == second
+    assert email not in encoded
+    assert "Alice.Smith" not in encoded
+    assert "Example.COM" not in encoded
+    assert first["owner"].startswith("email.sha256:")
+    assert first["message"].count(first["owner"]) == 2
+
+
+def test_minimal_mode_preserves_email_addresses() -> None:
+    email = "owner@example.test"
+
+    assert redact({"owner": email}, mode="minimal") == {"owner": email}
+
+
 def test_log_sanitizer_removes_uri_and_oracle_dsn_passwords() -> None:
     text = "https://alice:uri-secret@example.test reader/oracle-secret@//db:1521/PDB"
     sanitized = sanitize_log_text(text)

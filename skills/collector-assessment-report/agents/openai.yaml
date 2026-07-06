@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collector Assessment Report"
+  short_description: "Turn collector output into an interactive compliance report"
+  default_prompt: "Use $collector-assessment-report on /absolute/path/to/collector-output to generate an evidence-backed interactive HTML compliance report."

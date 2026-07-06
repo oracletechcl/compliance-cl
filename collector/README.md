@@ -52,6 +52,18 @@ Orden operacional recomendado: instance/resource principal, session token y, fin
 
 La versión inicial procesa una tenancy OCI por corrida y múltiples regiones y compartments dentro de ella.
 
+Para colecciones OCI completas, `run.parallelism` controla cuántos servicios/regiones se consultan en
+paralelo (default: `16`; el perfil `full-stack` usa `32`). `oci.connect_timeout_seconds` y
+`oci.read_timeout_seconds` limitan esperas de red por llamada (defaults: `5` y `30`). Los clientes cierran
+su pool HTTP al terminar cada tarea para liberar sockets. Si OCI responde `429`, el backoff paginado sigue
+aplicándose; reduzca el paralelismo si la tenancy presenta throttling sostenido. El colector desactiva la
+estrategia de retry implícita del SDK (hasta 10 minutos en algunas operaciones) para que estos límites sean
+efectivos y para mantener el aislamiento de fallos por servicio.
+
+Referencias oficiales: [timeouts de conexión/lectura](https://docs.oracle.com/en-us/iaas/tools/python/latest/customize_service_client/connection_read_timeout.html),
+[estrategias de retry](https://docs.oracle.com/en-us/iaas/tools/python/latest/sdk_behaviors/retries.html) y
+[helpers de paginación](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/pagination.html).
+
 ### Perfiles por stack y ambiente
 
 El directorio [`configs/`](configs/README.md) contiene perfiles independientes para:

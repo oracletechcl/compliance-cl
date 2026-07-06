@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ...models import CollectorResult, EvidenceRecord
 from ..base import as_mapping, evidence_id
@@ -28,9 +28,47 @@ def _definitions() -> dict[str, ServiceSpec]:
 
 SERVICE_COLLECTORS = _definitions()
 
+IMPLICIT_ALL_EXCLUDED_SERVICES = {
+    "threat_intelligence": (
+        "excluded from implicit services=all because OCI Threat Intelligence "
+        "list_indicators is a global feed, not customer compartment inventory; "
+        "select threat_intelligence explicitly to opt in"
+    ),
+}
+
+
+def resolve_configured_services(
+    configured: str | Iterable[str],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve configured OCI services and explain implicit scope exclusions."""
+    if configured == "all":
+        services = [
+            service
+            for service in SERVICE_COLLECTORS
+            if service not in IMPLICIT_ALL_EXCLUDED_SERVICES
+        ]
+        skipped = [
+            {"service": service, "reason": reason}
+            for service, reason in IMPLICIT_ALL_EXCLUDED_SERVICES.items()
+        ]
+        return services, skipped
+    if isinstance(configured, str):
+        return [configured], []
+    return list(configured), []
+
 
 def _resource_name(item: dict[str, Any]) -> str:
-    return str(item.get("display_name") or item.get("name") or item.get("id") or "unknown")
+    return str(
+        item.get("display_name")
+        or item.get("name")
+        or item.get("id")
+        or item.get("event_id")
+        or "unknown"
+    )
+
+
+def _resource_id(item: dict[str, Any], resource_name: str) -> str:
+    return str(item.get("id") or item.get("event_id") or resource_name)
 
 
 def _signal(spec: ServiceSpec, item: dict[str, Any]) -> str:
@@ -116,11 +154,22 @@ def collect_registered_service(
     mapped: list[dict[str, Any]] = []
     successful_operations = 0
 
-    def collect_operation(operation_name: str, **kwargs: Any) -> list[dict[str, Any]]:
+    def collect_operation(
+        operation_name: str,
+        *,
+        max_pages: int | None = None,
+        on_truncated: Callable[[], None] | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
         nonlocal successful_operations
         operation = getattr(client, operation_name)
         try:
-            resources = paginate(operation, **kwargs)
+            resources = paginate(
+                operation,
+                max_pages=max_pages,
+                on_truncated=on_truncated,
+                **kwargs,
+            )
         except Exception as exc:
             _record_error(result, name, operation_name, region, exc)
             return []
@@ -158,7 +207,8 @@ def collect_registered_service(
         if not hasattr(client, "list_namespaces"):
             _record_error(result, name, "list_namespaces", region, AttributeError("list_namespaces unavailable"))
         else:
-            namespaces = collect_operation("list_namespaces", compartment_id=compartment_id)
+            namespace_scope = str(context.get("tenancy_ocid") or compartment_id)
+            namespaces = collect_operation("list_namespaces", compartment_id=namespace_scope)
             for namespace in namespaces:
                 namespace_name = namespace.get("namespace_name") or namespace.get("namespaceName") or namespace.get("name")
                 if namespace_name:
@@ -176,8 +226,46 @@ def collect_registered_service(
                 namespace = client.get_namespace(compartment_id=compartment_id).data
                 kwargs["namespace_name"] = namespace
             elif name == "audit" and operation_name == "list_events":
-                kwargs["start_time"] = datetime.now(timezone.utc) - timedelta(days=30)
-                kwargs["end_time"] = datetime.now(timezone.utc)
+                end_time = datetime.now(timezone.utc)
+                kwargs["start_time"] = end_time - timedelta(days=30)
+                kwargs["end_time"] = end_time
+                mapped.extend(
+                    collect_operation(
+                        operation_name,
+                        max_pages=1,
+                        on_truncated=lambda: result.warnings.append(
+                            "OCI audit list_events limited to the first page of the 30-day window; "
+                            "additional events were not collected because this is a bounded evidence sample"
+                        ),
+                        **kwargs,
+                    )
+                )
+                continue
+            elif name == "threat_intelligence" and operation_name == "list_indicators":
+                tenancy_ocid = context.get("tenancy_ocid")
+                if not tenancy_ocid:
+                    _record_error(
+                        result,
+                        name,
+                        operation_name,
+                        region,
+                        ValueError("tenancy OCID unavailable"),
+                    )
+                    continue
+                kwargs["compartment_id"] = str(tenancy_ocid)
+                kwargs["limit"] = 1
+                mapped.extend(
+                    collect_operation(
+                        operation_name,
+                        max_pages=1,
+                        on_truncated=lambda: result.warnings.append(
+                            "OCI threat_intelligence list_indicators limited to the first page; "
+                            "additional indicators were not collected because this is presence evidence"
+                        ),
+                        **kwargs,
+                    )
+                )
+                continue
             mapped.extend(collect_operation(operation_name, **kwargs))
 
     if successful_operations:
@@ -187,9 +275,10 @@ def collect_registered_service(
     result.raw_files[raw_path] = mapped
     for item in mapped:
         resource = _resource_name(item)
+        resource_id = _resource_id(item, resource)
         result.inventory.append(
             {
-                "id": item.get("id", resource),
+                "id": resource_id,
                 "layer": spec.layer,
                 "type": name,
                 "region": region,
@@ -199,7 +288,7 @@ def collect_registered_service(
         )
         result.evidence.append(
             EvidenceRecord(
-                id=evidence_id(f"oci.{name}", f"{region}:{compartment_id}:{resource}", spec.attribute),
+                id=evidence_id(f"oci.{name}", f"{region}:{compartment_id}:{resource_id}", spec.attribute),
                 layer=spec.layer,
                 resource=resource,
                 attribute=OPERATION_ATTRIBUTES.get(str(item.get("_collector_operation", "")), spec.attribute),

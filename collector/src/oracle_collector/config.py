@@ -16,7 +16,7 @@ class RunConfig:
     name: str
     redaction: str = "strict"
     offline_only: bool = False
-    parallelism: int = 8
+    parallelism: int = 16
 
     def __post_init__(self) -> None:
         if not self.name or any(part in self.name for part in ("/", "\\", "..")):
@@ -37,6 +37,8 @@ class OciConfig:
     regions: tuple[str, ...] = ()
     compartments: str | tuple[str, ...] = "all"
     services: str | tuple[str, ...] = "all"
+    connect_timeout_seconds: float = 5.0
+    read_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         allowed = {"config_file", "instance_principal", "session_token", "resource_principal"}
@@ -44,6 +46,12 @@ class OciConfig:
             raise ConfigError(f"unsupported OCI auth mode: {self.auth}")
         if self.enabled and not self.regions:
             raise ConfigError("oci.regions is required when OCI collection is enabled")
+        for field_name, value in (
+            ("connect_timeout_seconds", self.connect_timeout_seconds),
+            ("read_timeout_seconds", self.read_timeout_seconds),
+        ):
+            if not 0 < value <= 300:
+                raise ConfigError(f"oci.{field_name} timeout must be between 0 and 300 seconds")
 
 
 @dataclass(frozen=True)
@@ -108,7 +116,7 @@ def load_config(path: str | Path) -> CollectorConfig:
         name=str(run_raw.get("name", "")),
         redaction=str(run_raw.get("redaction", "strict")),
         offline_only=bool(run_raw.get("offline_only", False)),
-        parallelism=int(run_raw.get("parallelism", 8)),
+        parallelism=int(run_raw.get("parallelism", 16)),
     )
 
     oci_raw = raw.get("oci", {}) or {}
@@ -126,6 +134,8 @@ def load_config(path: str | Path) -> CollectorConfig:
         regions=tuple(regions),
         compartments=_tuple_or_all(oci_raw.get("compartments", "all"), "oci.compartments"),
         services=_tuple_or_all(oci_raw.get("services", "all"), "oci.services"),
+        connect_timeout_seconds=float(oci_raw.get("connect_timeout_seconds", 5.0)),
+        read_timeout_seconds=float(oci_raw.get("read_timeout_seconds", 30.0)),
     )
     onprem_db = raw.get("onprem_db", {}) or {}
     middleware = raw.get("onprem_middleware", {}) or {}

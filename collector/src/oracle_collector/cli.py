@@ -7,8 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .collectors.oci.auth import OciAuthError, auth_context, create_client
-from .collectors.oci.registry import SERVICE_COLLECTORS, collect_service_across_compartments
+from .collectors.oci.auth import OciAuthError, auth_context, close_client, create_client
+from .collectors.oci.registry import (
+    collect_service_across_compartments,
+    resolve_configured_services,
+)
 from .collectors.oci.traversal import resolve_availability_domains, resolve_compartments
 from .config import CollectorConfig, ConfigError, load_config
 from .encryption import load_key
@@ -67,12 +70,52 @@ def resolve_selection(config: CollectorConfig, args: argparse.Namespace) -> RunS
 
 
 def _selected_oci_services(config: CollectorConfig, selection: RunSelection) -> list[str]:
-    configured = list(SERVICE_COLLECTORS) if config.oci.services == "all" else list(config.oci.services)
+    configured, _skipped = resolve_configured_services(config.oci.services)
     return [service for service in configured if selection.includes(f"oci.{service}")]
+
+
+def _implicit_oci_service_skips(
+    config: CollectorConfig,
+    selection: RunSelection,
+) -> list[dict[str, str]]:
+    if not config.oci.enabled or selection.offline_only:
+        return []
+    _configured, skipped = resolve_configured_services(config.oci.services)
+    return [
+        item
+        for item in skipped
+        if selection.includes(f"oci.{item['service']}")
+    ]
 
 
 def _result_from_records(records: list[Any], service: str) -> CollectorResult:
     return CollectorResult(evidence=records, services_scanned=[service])
+
+
+def _cloud_guard_reporting_region(
+    config: CollectorConfig,
+    services: list[str],
+    tenancy: str,
+    discovery_region: str,
+) -> str | None:
+    if not {"cloud_guard", "security_zones"}.intersection(services):
+        return None
+    client = None
+    try:
+        client = create_client("cloud_guard", config.oci, discovery_region)
+        response = client.get_configuration(tenancy)
+        data = getattr(response, "data", None)
+        reporting_region = (
+            data.get("reporting_region")
+            if isinstance(data, dict)
+            else getattr(data, "reporting_region", None)
+        )
+        return reporting_region.strip() if isinstance(reporting_region, str) and reporting_region.strip() else None
+    except Exception:
+        return None
+    finally:
+        if client is not None:
+            close_client(client)
 
 
 def _onprem_tasks(config: CollectorConfig, selection: RunSelection, out_dir: Path) -> list[CollectorTask]:
@@ -137,30 +180,67 @@ def _oci_tasks(config: CollectorConfig, selection: RunSelection) -> tuple[list[C
         return [], {}
     identity_region = config.oci.regions[0]
     identity = create_client("iam", config.oci, identity_region)
-    tenancy = config.oci.tenancy_ocid
-    if not tenancy:
-        values, _ = auth_context(config.oci)
-        tenancy = values.get("tenancy")
-    if not tenancy:
-        raise OciAuthError("OCI tenancy OCID is required")
-    compartments = resolve_compartments(identity, tenancy, config.oci.compartments)
-    context_by_compartment: dict[str, dict[str, Any]] = {}
-    if "block_storage" in services:
-        for compartment in compartments:
-            try:
-                domains = resolve_availability_domains(identity, compartment)
-            except Exception:
-                domains = []
-            context_by_compartment[compartment] = {"availability_domains": domains}
+    try:
+        tenancy = config.oci.tenancy_ocid
+        if not tenancy:
+            values, _ = auth_context(config.oci)
+            tenancy = values.get("tenancy")
+        if not tenancy:
+            raise OciAuthError("OCI tenancy OCID is required")
+        compartments = resolve_compartments(identity, tenancy, config.oci.compartments)
+        context_by_compartment: dict[str, dict[str, Any]] = {
+            compartment: {"tenancy_ocid": tenancy}
+            for compartment in compartments
+        }
+        if "block_storage" in services:
+            for compartment in compartments:
+                try:
+                    domains = resolve_availability_domains(identity, compartment)
+                except Exception:
+                    domains = []
+                context_by_compartment[compartment]["availability_domains"] = domains
+    finally:
+        close_client(identity)
+
+    cloud_guard_region = _cloud_guard_reporting_region(
+        config,
+        services,
+        tenancy,
+        identity_region,
+    )
+
+    def collect_oci_service(
+        service: str,
+        client: Any,
+        compartments: tuple[str, ...],
+        region: str,
+        contexts: dict[str, dict[str, Any]],
+    ) -> CollectorResult:
+        try:
+            return collect_service_across_compartments(
+                service,
+                client,
+                compartments,
+                region,
+                context_by_compartment=contexts,
+            )
+        finally:
+            close_client(client)
+
     tasks: list[CollectorTask] = []
     for region in config.oci.regions:
         for service in services:
-            client = create_client(service, config.oci, region)
+            client_region = (
+                cloud_guard_region
+                if cloud_guard_region and service in {"cloud_guard", "security_zones"}
+                else region
+            )
+            client = create_client(service, config.oci, client_region)
             tasks.append(
                 CollectorTask(
                     f"oci.{service}",
-                    lambda service=service, client=client, compartments=tuple(compartments), region=region, contexts=context_by_compartment: collect_service_across_compartments(
-                        service, client, compartments, region, context_by_compartment=contexts
+                    lambda service=service, client=client, compartments=tuple(compartments), region=region, contexts=context_by_compartment: collect_oci_service(
+                        service, client, compartments, region, contexts
                     ),
                     region=region,
                 )
@@ -185,6 +265,12 @@ def _plan(config: CollectorConfig, selection: RunSelection) -> dict[str, Any]:
         "skip": list(selection.skip),
         "oci_regions": list(config.oci.regions) if services else [],
         "oci_services": services,
+        "oci_services_skipped": _implicit_oci_service_skips(config, selection),
+        "parallelism": config.run.parallelism,
+        "oci_timeouts_seconds": {
+            "connect": config.oci.connect_timeout_seconds,
+            "read": config.oci.read_timeout_seconds,
+        } if services else {},
         "onprem_db": bool(config.onprem_db.get("enabled", False)),
         "onprem_middleware": bool(config.onprem_middleware.get("enabled", False)),
         "mutations": [],
@@ -204,6 +290,7 @@ def execute(config: CollectorConfig, args: argparse.Namespace) -> int:
     oci_tasks, environment = _oci_tasks(config, selection)
     tasks.extend(oci_tasks)
     result = run_tasks(tasks, config.run.parallelism)
+    result.services_skipped.extend(_implicit_oci_service_skips(config, selection))
     result.environment.update(environment)
     db_targets = []
     db_config = dict(config.onprem_db)

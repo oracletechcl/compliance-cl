@@ -8,6 +8,14 @@ from pathlib import Path
 from typing import Any
 
 
+def _sdk_model_values(value: Any) -> dict[str, Any] | None:
+    """Return OCI SDK-style model values exposed through generated properties."""
+    swagger_types = getattr(value, "swagger_types", None)
+    if not isinstance(swagger_types, Mapping):
+        return None
+    return {str(key): getattr(value, str(key), None) for key in swagger_types}
+
+
 def evidence_id(collector: str, resource: str, attribute: str) -> str:
     digest = hashlib.sha256(f"{collector}|{resource}|{attribute}".encode("utf-8")).hexdigest()[:12]
     return f"ev-{digest}"
@@ -30,6 +38,9 @@ def json_safe(value: Any) -> Any:
         return [json_safe(child) for child in value]
     if hasattr(value, "to_dict"):
         return json_safe(value.to_dict())
+    sdk_values = _sdk_model_values(value)
+    if sdk_values is not None:
+        return json_safe(sdk_values)
     if hasattr(value, "__dict__"):
         return json_safe({key: child for key, child in vars(value).items() if not key.startswith("_")})
     return str(value)
@@ -40,6 +51,9 @@ def as_mapping(resource: Any) -> dict[str, Any]:
         return json_safe(resource)
     if hasattr(resource, "to_dict"):
         return json_safe(resource.to_dict())
+    sdk_values = _sdk_model_values(resource)
+    if sdk_values is not None:
+        return json_safe(sdk_values)
     if hasattr(resource, "__dict__"):
         return json_safe({key: value for key, value in vars(resource).items() if not key.startswith("_")})
     return {"value": str(resource)}

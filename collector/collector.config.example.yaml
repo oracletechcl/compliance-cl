@@ -2,7 +2,7 @@ run:
   name: acme-prod-2026-07
   redaction: strict
   offline_only: false
-  parallelism: 8
+  parallelism: 32
 
 oci:
   enabled: true
@@ -13,6 +13,8 @@ oci:
   regions: [sa-santiago-1]
   compartments: all
   services: all
+  connect_timeout_seconds: 5
+  read_timeout_seconds: 30
 
 onprem_db:
   enabled: true

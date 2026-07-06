@@ -80,6 +80,9 @@ CLIENT_PATHS = {
     "disaster_recovery": "disaster_recovery.DisasterRecoveryClient",
 }
 
+SLOW_READ_TIMEOUT_SERVICES = {"audit"}
+SLOW_READ_TIMEOUT_FLOOR_SECONDS = 120.0
+
 
 def create_client(service: str, config: OciConfig, region: str) -> Any:
     oci = _oci()
@@ -88,10 +91,27 @@ def create_client(service: str, config: OciConfig, region: str) -> Any:
     for part in dotted.split("."):
         target = getattr(target, part)
     values, signer = auth_context(config)
-    kwargs: dict[str, Any] = {}
+    read_timeout = config.read_timeout_seconds
+    if service in SLOW_READ_TIMEOUT_SERVICES:
+        read_timeout = max(read_timeout, SLOW_READ_TIMEOUT_FLOOR_SECONDS)
+    kwargs: dict[str, Any] = {
+        "timeout": (config.connect_timeout_seconds, read_timeout),
+        # Some generated list operations opt into OCI's 10-minute default retry
+        # strategy. Collection owns its bounded 429 retry policy instead.
+        "retry_strategy": oci.retry.NoneRetryStrategy(),
+    }
     if signer is not None:
         kwargs["signer"] = signer
     client = target(values, **kwargs)
     if hasattr(client, "base_client"):
         client.base_client.set_region(region)
     return client
+
+
+def close_client(client: Any) -> None:
+    """Release the HTTP connection pool held by an OCI SDK client."""
+    base_client = getattr(client, "base_client", None)
+    session = getattr(base_client, "session", None)
+    close = getattr(session, "close", None)
+    if callable(close):
+        close()

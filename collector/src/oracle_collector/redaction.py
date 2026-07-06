@@ -11,6 +11,12 @@ SECRET_FIELD_PATTERN = re.compile(
     r"(?:password|passwd|secret(?:_value)?|token|authorization|api[_-]?key|private[_-]?key)", re.IGNORECASE
 )
 OCID_PATTERN = re.compile(r"\bocid1\.[a-z0-9_-]+\.[a-z0-9_.-]+", re.IGNORECASE)
+EMAIL_PATTERN = re.compile(
+    r"(?<![\w.+-])[a-z0-9][a-z0-9.!#$%&'*+/=?^_`{|}~-]*@"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?![\w-])",
+    re.IGNORECASE,
+)
 BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/]+=*")
 ASSIGNMENT_PATTERN = re.compile(
     r"(?i)\b([a-z0-9_-]*(?:password|passwd|secret|token|authorization|api[_-]?key))"
@@ -38,6 +44,11 @@ def _truncate_identifier(value: str) -> str:
     return f"ocid1.{kind}.redacted:{value[-10:]}"
 
 
+def _hash_email(value: str) -> str:
+    digest = hashlib.sha256(value.casefold().encode("utf-8")).hexdigest()[:16]
+    return f"email.sha256:{digest}"
+
+
 def sanitize_log_text(text: str, mode: str = "strict") -> str:
     sanitized = PRIVATE_KEY_PATTERN.sub(REDACTED, text)
     sanitized = PRIVATE_KEY_START_PATTERN.sub(REDACTED, sanitized)
@@ -46,6 +57,7 @@ def sanitize_log_text(text: str, mode: str = "strict") -> str:
     sanitized = BEARER_PATTERN.sub(f"Bearer {REDACTED}", sanitized)
     sanitized = ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}={REDACTED}", sanitized)
     if mode == "strict":
+        sanitized = EMAIL_PATTERN.sub(lambda match: _hash_email(match.group(0)), sanitized)
         sanitized = OCID_PATTERN.sub(lambda match: _hash_identifier(match.group(0)), sanitized)
     else:
         sanitized = OCID_PATTERN.sub(lambda match: _truncate_identifier(match.group(0)), sanitized)
